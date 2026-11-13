@@ -121,7 +121,7 @@ ER  -
     def test_deduplicate_merges_aliases_and_assigns_codes(self):
         entries = [
             {"code": "S01", "title": "Graph Survey", "doi": "10.1109/EXAMPLE.1", "url": "", "year": "", "source": "a.md"},
-            {"code": "doe2023", "title": "Graph Survey: A Comprehensive Review", "doi": "https://doi.org/10.1109/example.1", "url": "", "year": "2023", "source": "b.bib"},
+            {"code": "doe2023", "title": "Graph Survey: A Comprehensive Review", "doi": "https://doi.org/10.1109/example.1", "url": "https://ieeexplore.ieee.org/document/999", "year": "2023", "source": "b.bib"},
             {"code": "", "title": "Standalone Paper", "doi": "", "url": "https://arxiv.org/pdf/2401.00001.pdf", "year": "2024", "source": "c.txt"},
         ]
         deduped = deduplicate_papers(entries)
@@ -129,8 +129,55 @@ ER  -
         self.assertEqual(deduped[0]["code"], "S01")
         self.assertEqual(deduped[0]["aliases"], ["S01", "doe2023"])
         self.assertEqual(deduped[0]["title"], "Graph Survey: A Comprehensive Review")
+        self.assertEqual(deduped[0]["url"], "https://ieeexplore.ieee.org/document/999")
         self.assertEqual(deduped[0]["year"], "2023")
         self.assertEqual(deduped[1]["code"], "P001")
+
+    def test_legacy_wiley_url_with_angle_brackets_and_parens(self):
+        wiley_url = "https://doi.org/10.1002/1521-4117(200001)10:1<1::AID-EX1>3.0.CO;2-0"
+        md_entries = parse_markdown(f"- [M01] [Legacy Wiley Paper]({wiley_url})", source="legacy.md")
+        self.assertEqual(len(md_entries), 1)
+        self.assertEqual(md_entries[0]["doi"], "10.1002/1521-4117(200001)10:1<1::aid-ex1>3.0.co;2-0")
+        self.assertEqual(md_entries[0]["url"], "https://doi.org/10.1002/1521-4117(200001)10:1<1::aid-ex1>3.0.co;2-0")
+
+        plain_entries = parse_plain_list(wiley_url, source="legacy.txt")
+        self.assertEqual(len(plain_entries), 1)
+        self.assertEqual(plain_entries[0]["url"], "https://doi.org/10.1002/1521-4117(200001)10:1<1::aid-ex1>3.0.co;2-0")
+
+    def test_bibtex_quote_inside_braces_and_csv_comma_title(self):
+        bib = """
+@article{k1,
+  title = {Characterization of a 5" Prototype Sensor},
+  doi = {10.1109/EXAMPLE.1}
+}
+@article{k2,
+  title = {Second Valid Entry},
+  doi = {10.1016/j.example.2}
+}
+"""
+        bib_entries = parse_bibtex(bib, source="quotes.bib")
+        self.assertEqual(len(bib_entries), 2)
+        self.assertEqual(bib_entries[0]["code"], "k1")
+        self.assertEqual(bib_entries[1]["code"], "k2")
+
+        csv_txt = 'S01,"A Study on X, Y, and Z",10.1109/EXAMPLE.3\nS02 10.1088/1234/4\n'
+        plain_entries = parse_plain_list(csv_txt, source="list.txt")
+        self.assertEqual(len(plain_entries), 2)
+        self.assertEqual(plain_entries[0]["code"], "S01")
+        self.assertEqual(plain_entries[0]["title"], "A Study on X, Y, and Z")
+        self.assertEqual(plain_entries[1]["code"], "S02")
+        self.assertEqual(plain_entries[1]["title"], "")
+
+    def test_deduplicate_disambiguates_colliding_codes(self):
+        entries = [
+            {"code": "S01", "title": "First Distinct Paper", "doi": "10.1109/EXAMPLE.1"},
+            {"code": "S01", "title": "Second Distinct Paper", "doi": "10.1016/j.example.2"},
+        ]
+        deduped = deduplicate_papers(entries)
+        self.assertEqual(len(deduped), 2)
+        self.assertEqual(deduped[0]["code"], "S01")
+        self.assertEqual(deduped[1]["code"], "S01_2")
+        self.assertNotIn("S01", deduped[1]["aliases"])
 
     def test_sanitize_filename(self):
         self.assertEqual(sanitize_filename('A/B:C*D?"E<F>G|H'), "A_B_C_D_E_F_G_H")

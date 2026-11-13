@@ -9,15 +9,50 @@ Supports:
 
 from __future__ import annotations
 
+import csv
 import os
 import re
 from typing import Any
 
 DOI_RE = re.compile(r"(10\.\d{4,9}/[^\s\"'`]+)", re.IGNORECASE)
-URL_RE = re.compile(r"(https?://[^\s\"'<>`\)]+(?:\([^\s\"'<>`\)]*\))*[^\s\"'<>`\)]*)", re.IGNORECASE)
+URL_RE = re.compile(r"(https?://[^\s\"'`]+)", re.IGNORECASE)
 MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
-CODE_BRACKET_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)?\s*\[([A-Za-z]{0,6}\d{1,5}[A-Za-z]?)\]\s*(.+)$")
+CODE_BRACKET_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)?\s*\*{0,2}\[([A-Za-z]{0,6}\d{1,5}[A-Za-z]?)\]\*{0,2}\s*(.+)$")
 CODE_PREFIX_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)?\s*\*{0,2}([A-Za-z]{1,6}\d{1,5}[A-Za-z]?)\*{0,2}\s*[:：\-—]\s*(.+)$")
+
+
+def _extract_md_links(text: str) -> list[tuple[str, str, int, int]]:
+    """Extract Markdown links [label](https://...) with balanced parenthesis support."""
+    results: list[tuple[str, str, int, int]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "[":
+            close_bracket = text.find("]", i + 1)
+            if close_bracket != -1 and close_bracket + 1 < n and text[close_bracket + 1] == "(":
+                label = text[i + 1 : close_bracket]
+                url_start = close_bracket + 2
+                if text[url_start:].lower().startswith(("http://", "https://")):
+                    depth = 1
+                    j = url_start
+                    while j < n and depth > 0:
+                        ch = text[j]
+                        if ch in " \t\r\n":
+                            break
+                        if ch == "(":
+                            depth += 1
+                        elif ch == ")":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        j += 1
+                    if depth == 0:
+                        url = text[url_start:j]
+                        results.append((label, url, i, j + 1))
+                        i = j + 1
+                        continue
+        i += 1
+    return results
 
 
 def _strip_unbalanced_trailing(value: str) -> str:
@@ -118,7 +153,16 @@ def classify_publisher(doi: str = "", url: str = "") -> str:
 
 
 def _clean_markdown_text(text: str) -> str:
-    text = MD_LINK_RE.sub(lambda m: m.group(1), text)
+    links = _extract_md_links(text)
+    if links:
+        parts: list[str] = []
+        last = 0
+        for label, _, start, end in links:
+            parts.append(text[last:start])
+            parts.append(label)
+            last = end
+        parts.append(text[last:])
+        text = "".join(parts)
     text = URL_RE.sub("", text)
     text = re.sub(r"(?:https?://(?:dx\.)?doi\.org/)?10\.\d{4,9}/[^\s\"'`]+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\bdoi\s*[:：]?\s*", "", text, flags=re.IGNORECASE)
@@ -139,7 +183,7 @@ def _make_entry(
 ) -> dict[str, Any]:
     norm_doi = normalize_doi(doi) or normalize_doi(url)
     norm_url = normalize_url(url)
-    if not norm_url and norm_doi:
+    if norm_doi and (not norm_url or re.match(r"^https?://(?:dx\.)?doi\.org/", norm_url, re.IGNORECASE)):
         norm_url = f"https://doi.org/{norm_doi}"
     clean_title = re.sub(r"\s+", " ", (title or "").strip())
     return {
@@ -165,7 +209,7 @@ def _parse_markdown_table(lines: list[str], source: str) -> list[dict[str, Any]]
                 cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
                 row_text = " | ".join(cells)
                 doi = normalize_doi(row_text)
-                urls = [m.group(2) for m in MD_LINK_RE.finditer(row_text)] + URL_RE.findall(row_text)
+                urls = [u for _, u, _, _ in _extract_md_links(row_text)] + URL_RE.findall(row_text)
                 url = next((normalize_url(u) for u in urls if normalize_url(u)), "")
 
                 code = ""
@@ -230,11 +274,11 @@ def parse_markdown(text: str, source: str = "markdown") -> list[dict[str, Any]]:
             continue
 
         doi = normalize_doi(line)
-        md_links = list(MD_LINK_RE.finditer(line))
+        md_links = _extract_md_links(line)
         raw_urls = URL_RE.findall(line)
         url = ""
         if md_links:
-            url = normalize_url(md_links[0].group(2))
+            url = normalize_url(md_links[0][1])
         elif raw_urls:
             url = normalize_url(raw_urls[0])
 
@@ -252,11 +296,11 @@ def parse_markdown(text: str, source: str = "markdown") -> list[dict[str, Any]]:
 
         title = ""
         if md_links and len(_clean_markdown_text(rest)) < 8:
-            title = _clean_markdown_text(md_links[0].group(1))
+            title = _clean_markdown_text(md_links[0][0])
         if not title:
             title = _clean_markdown_text(rest)
         if not title and md_links:
-            title = _clean_markdown_text(md_links[0].group(1))
+            title = _clean_markdown_text(md_links[0][0])
 
         m_yr = re.search(r"\b(19\d{2}|20\d{2})\b", line)
         year = m_yr.group(1) if m_yr else ""
@@ -285,7 +329,10 @@ def parse_plain_list(text: str, source: str = "doi_list") -> list[dict[str, Any]
                 delimiter = ","
 
         if delimiter:
-            parts = [p.strip() for p in line.split(delimiter) if p.strip()]
+            if delimiter == ",":
+                parts = [p.strip() for p in next(csv.reader([line])) if p.strip()]
+            else:
+                parts = [p.strip() for p in line.split(delimiter) if p.strip()]
             code = ""
             title = ""
             doi = ""
@@ -316,13 +363,19 @@ def parse_plain_list(text: str, source: str = "doi_list") -> list[dict[str, Any]
         if doi or url:
             leftover = URL_RE.sub("", line)
             leftover = DOI_RE.sub("", leftover)
+            leftover = re.sub(r"\bdoi\s*[:：]?\s*", "", leftover, flags=re.IGNORECASE)
             leftover = re.sub(r"^[\s\-:,;|]+|[\s\-:,;|]+$", "", leftover).strip()
-            entries.append(_make_entry(title=leftover, doi=doi, url=url, source=source))
+            code = ""
+            if re.fullmatch(r"[A-Za-z]{1,6}\d{1,5}[A-Za-z]?", leftover):
+                code = leftover
+                leftover = ""
+            entries.append(_make_entry(code=code, title=leftover, doi=doi, url=url, source=source))
 
     return entries
 
 
 def _clean_bibtex_value(val: str) -> str:
+    val = re.sub(r"\\url\{([^}]*)\}", r"\1", val)
     val = re.sub(r"\s+", " ", val).strip()
     # Iteratively strip outer braces while preserving content
     while len(val) >= 2 and ((val[0] == "{" and val[-1] == "}") or (val[0] == '"' and val[-1] == '"')):
@@ -363,18 +416,31 @@ def parse_bibtex(text: str, source: str = "bibtex") -> list[dict[str, Any]]:
         close_ch = "}" if open_ch == "{" else ")"
         start = at_idx + m_head.end()
         depth = 1
+        brace_depth = 0
         i = start
         in_quotes = False
         while i < length and depth > 0:
             ch = text[i]
             prev = text[i - 1] if i > 0 else ""
             if ch == '"' and prev != "\\":
-                in_quotes = not in_quotes
+                if depth == 1 and brace_depth == 0:
+                    in_quotes = not in_quotes
             elif not in_quotes:
-                if ch == open_ch:
-                    depth += 1
-                elif ch == close_ch:
-                    depth -= 1
+                if open_ch == "{":
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                else:
+                    if ch == "{" and prev != "\\":
+                        brace_depth += 1
+                    elif ch == "}" and prev != "\\" and brace_depth > 0:
+                        brace_depth -= 1
+                    elif brace_depth == 0:
+                        if ch == "(":
+                            depth += 1
+                        elif ch == ")":
+                            depth -= 1
             i += 1
         body = text[start : i - 1].strip()
         pos = i
@@ -577,9 +643,7 @@ def deduplicate_papers(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if doi and not rec["doi"]:
                 rec["doi"] = doi
             if url and (not rec["url"] or (rec["url"].startswith("https://doi.org/") and not url.startswith("https://doi.org/"))):
-                # Keep direct publisher URL if previously only had doi.org, or prefer doi.org if url empty
-                if not rec["url"]:
-                    rec["url"] = url
+                rec["url"] = url
             if year and not rec["year"]:
                 rec["year"] = year
             rec["publisher"] = classify_publisher(rec["doi"], rec["url"])
@@ -589,16 +653,29 @@ def deduplicate_papers(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for k in keys:
             key_to_idx[k] = matched_idx
 
-    # Ensure every record has a deterministic non-empty code
-    used_codes = {r["code"] for r in deduped if r["code"]}
+    # Ensure every record has a deterministic, globally unique non-empty code
+    used_codes: set[str] = set()
     auto_idx = 1
     for rec in deduped:
-        if not rec["code"]:
-            while f"P{auto_idx:03d}" in used_codes:
+        code = rec["code"]
+        if code:
+            if code.lower() in used_codes:
+                suffix = 2
+                while f"{code}_{suffix}".lower() in used_codes:
+                    suffix += 1
+                new_code = f"{code}_{suffix}"
+                rec["aliases"] = [new_code if a.lower() == code.lower() else a for a in rec["aliases"]]
+                if new_code not in rec["aliases"]:
+                    rec["aliases"].append(new_code)
+                rec["code"] = new_code
+            used_codes.add(rec["code"].lower())
+        else:
+            while f"p{auto_idx:03d}" in used_codes:
                 auto_idx += 1
             rec["code"] = f"P{auto_idx:03d}"
-            rec["aliases"].append(rec["code"])
-            used_codes.add(rec["code"])
+            if rec["code"] not in rec["aliases"]:
+                rec["aliases"].append(rec["code"])
+            used_codes.add(rec["code"].lower())
             auto_idx += 1
 
     return deduped

@@ -108,7 +108,7 @@ uv run python skills/academic-paper-downloader/scripts/paper_downloader.py check
 ### `download` — Controlled Batch Download Over CDP
 
 Supports filtering by `--publishers` (`ieee,sciencedirect,iop,wiley,acs,cnki`),
-`--codes`, `--limit`, `--retry-failed`, and `--dry-run`:
+`--codes`, `--limit`, `--retry-failed`, `--include-paywall`, and `--dry-run`:
 
 ```bash
 uv run --with playwright python skills/academic-paper-downloader/scripts/paper_downloader.py download \

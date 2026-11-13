@@ -242,7 +242,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         state_papers.append(
             {
                 "code": entry.get("code", ""),
-                "aliases": entry.get("aliases", [entry.get("code", "")]),
+                "aliases": [c for c in (entry.get("aliases") or [entry.get("code", "")]) if c],
                 "title": entry.get("title", ""),
                 "doi": doi,
                 "url": url,
@@ -328,11 +328,17 @@ def cmd_download(args: argparse.Namespace) -> int:
     os.makedirs(pdf_dir, exist_ok=True)
     state["pdf_dir"] = os.path.abspath(pdf_dir)
 
+    if args.delay_min < 0 or args.delay_max < args.delay_min:
+        print("Error: --delay-min must be >= 0 and --delay-max must be >= --delay-min.", file=sys.stderr)
+        return 1
+
     pub_filter = {p.strip().lower() for p in args.publishers.split(",") if p.strip()} if args.publishers else None
     code_filter = {c.strip().lower() for c in args.codes.split(",") if c.strip()} if args.codes else None
     allowed_statuses = {"pending"}
     if args.retry_failed:
         allowed_statuses.update({"failed", "rate_limited", "captcha_required"})
+    if args.include_paywall:
+        allowed_statuses.add("unauthorized_or_paywall")
 
     queue: list[dict[str, Any]] = []
     for item in papers:
@@ -536,6 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_dl.add_argument("--timeout-ms", type=int, default=45000, help="Page navigation/request timeout in milliseconds")
     p_dl.add_argument("--min-bytes", type=int, default=DEFAULT_MIN_PDF_BYTES, help="Minimum valid PDF size in bytes")
     p_dl.add_argument("--retry-failed", action="store_true", help="Include failed/rate_limited/captcha_required entries")
+    p_dl.add_argument("--include-paywall", action="store_true", help="Also retry unauthorized_or_paywall entries (e.g. after enabling VPN)")
     p_dl.add_argument("--stop-on-paywall", action="store_true", help="Stop immediately if an unsubscribed paywall is hit")
     p_dl.add_argument("--dry-run", action="store_true", help="Preview queued downloads without launching Playwright")
 

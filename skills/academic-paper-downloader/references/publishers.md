@@ -13,10 +13,10 @@ over an authenticated Chrome DevTools Protocol (CDP) session.
 |---|---|---|---|
 | `ieee` | `10.1109/*`, `ieeexplore.ieee.org` | Resolve `/document/<arnumber>`, fetch `stampPDF/getPDF.jsp?tp=&arnumber=<id>` via `page.request.get` | Check block/paywall markers |
 | `sciencedirect` | `10.1016/*`, `sciencedirect.com` | Locate `/pdfft` button, navigate to `pdf.sciencedirectassets.com`, fetch binary blob via in-page JS `fetch()` | Wait for delayed asset redirect |
-| `iop` | `10.1088/*`, `iopscience.iop.org` | Append `/pdf` to resolved article URL and `page.request.get` | Locate PDF `href` or `expect_download()` click |
+| `iop` | `10.1088/*`, `iopscience.iop.org` | Append `/pdf` to resolved article URL and `page.request.get` | In-page JS `fetch()` (Radware session), link `href`, or `expect_download()` |
 | `wiley` | `10.1002/*`, `10.1049/*`, `10.1111/*`, `onlinelibrary.wiley.com` | Rewrite `/doi/(abs\|full\|epdf)/` to `/doi/pdfdirect/` and `page.request.get` | Locate PDF `href` or `expect_download()` click |
-| `acs` | `10.1021/*`, `pubs.acs.org` | Locate `/doi/pdf/` link and fetch via `page.request.get` | CDP `Page.setDownloadBehavior` + `expect_download()` click |
-| `cnki` | `cnki.net`, `kns.cnki.net`, `oversea.cnki.net` | Detect slider/CAPTCHA first; locate `#pdfDown` / `PDF下载` and capture `expect_download()` | Pause & prompt user if `安全验证` appears |
+| `acs` | `10.1021/*`, `pubs.acs.org` | Locate `/doi/pdf/` or `article-pdf` link and fetch via `page.request.get` | In-page JS `fetch()`, CDP `Page.setDownloadBehavior` + `expect_download()`, or popup tab |
+| `cnki` | `cnki.net`, `kns.cnki.net`, `oversea.cnki.net` | Detect slider/CAPTCHA first; locate `#pdfDown` / `PDF下载` / `整本下载` and capture `expect_download()` | Popup viewer tab fetch or pause & prompt user if `安全验证` appears |
 | `other` | `springer`, `emerald`, `arxiv`, generic | Direct `.pdf` fetch or `<meta name="citation_pdf_url">` | Locate PDF link `href` or `expect_download()` click |
 
 ## Anti-Bot, CAPTCHA, and Paywall Handling

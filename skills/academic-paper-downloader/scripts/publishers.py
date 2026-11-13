@@ -105,9 +105,14 @@ def detect_page_block(url: str, title: str, body_text: str) -> tuple[str | None,
 
     captcha_text_markers = (
         "just a moment...",
+        "just a moment",
+        "请稍候",
         "verify you are human",
         "cf-challenge",
+        "attention required! | cloudflare",
         "radware bot manager",
+        "radware",
+        "shieldsquare",
         "安全验证",
         "滑动验证",
         "请完成安全验证",
@@ -136,6 +141,10 @@ def detect_page_block(url: str, title: str, body_text: str) -> tuple[str | None,
         "get access to the full version",
         "institutional login",
         "access through your institution",
+        "请登录",
+        "机构登录",
+        "无下载权限",
+        "购买本文",
     )
     if any(m in b for m in paywall_markers):
         return "unauthorized_or_paywall", f"Institutional access / subscription required: {url}"
@@ -236,8 +245,64 @@ def _try_save_bytes(data: bytes | None, err: str, out_path: str, method: str, mi
             bytes_written=len(data),
             method=method,
         )
-    if b"captcha" in data[:1024].lower() or b"perfdrive" in data[:1024].lower():
+    preview = data[:4096].decode("utf-8", errors="ignore")
+    b_status, b_reason = detect_page_block("", "", preview)
+    if b_status in ("captcha_required", "rate_limited"):
+        return DownloadResult(status=b_status, error=f"{b_reason} ({reason})")
+    if b"captcha" in data[:4096].lower() or b"perfdrive" in data[:4096].lower():
         return DownloadResult(status="captcha_required", error=f"Challenge returned by PDF endpoint ({reason})")
+    return None
+
+
+def _is_auth_error(err: str) -> bool:
+    return "401" in err or "403" in err
+
+
+def _finalize_failure(page: Any, default_error: str, last_err: str = "") -> DownloadResult:
+    url, title, body = _safe_inspect_page(page)
+    b_status, b_reason = detect_page_block(url, title, body)
+    if b_status:
+        return DownloadResult(status=b_status, error=b_reason)
+    if _is_auth_error(last_err):
+        return DownloadResult(status="unauthorized_or_paywall", error=f"{last_err} ({default_error})")
+    return DownloadResult(status="failed", error=default_error)
+
+
+def _try_popup_pdf(page: Any, locator: Any, out_path: str, timeout_ms: int, min_bytes: int, method_prefix: str) -> DownloadResult | None:
+    ctx = getattr(page, "context", None)
+    if ctx is None or not hasattr(ctx, "expect_page"):
+        return None
+    popup = None
+    try:
+        with ctx.expect_page(timeout=min(timeout_ms, 15000)) as new_page_info:
+            locator.click()
+        popup = new_page_info.value
+        try:
+            popup.wait_for_load_state("domcontentloaded", timeout=min(timeout_ms, 20000))
+        except Exception:
+            pass
+        time.sleep(2.0)
+        blocked = _check_block_on_current_page(popup)
+        if blocked:
+            return blocked
+        popup_url = getattr(popup, "url", "") or ""
+        if popup_url:
+            data, err = _fetch_via_request(popup, popup_url, timeout_ms)
+            saved = _try_save_bytes(data, err, out_path, f"{method_prefix}_popup_request", min_bytes)
+            if saved:
+                return saved
+            data_js, err_js = _fetch_via_inpage_js(popup)
+            saved_js = _try_save_bytes(data_js, err_js, out_path, f"{method_prefix}_popup_js", min_bytes)
+            if saved_js:
+                return saved_js
+    except Exception:
+        return None
+    finally:
+        if popup is not None:
+            try:
+                popup.close()
+            except Exception:
+                pass
     return None
 
 
@@ -266,19 +331,17 @@ def download_ieee(page: Any, item: dict[str, Any], out_path: str, timeout_ms: in
         time.sleep(2.0)
         m = re.search(r"/document/(\d+)", page.url)
 
+    last_err = ""
     if m:
         arnumber = m.group(1)
         pdf_url = f"https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={arnumber}"
         data, err = _fetch_via_request(page, pdf_url, timeout_ms)
+        last_err = err
         saved = _try_save_bytes(data, err, out_path, "ieee_getPDF", min_bytes)
         if saved:
             return saved
 
-    url, title, body = _safe_inspect_page(page)
-    b_status, b_reason = detect_page_block(url, title, body)
-    if b_status:
-        return DownloadResult(status=b_status, error=b_reason)
-    return DownloadResult(status="failed", error=f"Could not extract IEEE arnumber or valid PDF from {curr_url}")
+    return _finalize_failure(page, f"Could not extract IEEE arnumber or valid PDF from {curr_url}", last_err)
 
 
 def download_sciencedirect(page: Any, item: dict[str, Any], out_path: str, timeout_ms: int = 45000, min_bytes: int = DEFAULT_MIN_PDF_BYTES) -> DownloadResult:
@@ -290,12 +353,13 @@ def download_sciencedirect(page: Any, item: dict[str, Any], out_path: str, timeo
     if blocked:
         return blocked
 
-    sel = 'a[aria-label*="PDF"], a.link-button-primary, a[href*="/pdfft"]'
+    sel = 'a[href*="/pdfft"], a[aria-label*="PDF"], a.link-button-primary:has-text("PDF")'
     pdf_btn = page.locator(sel).first
     if pdf_btn.count() == 0:
         time.sleep(4.0)
         pdf_btn = page.locator(sel).first
 
+    last_err = ""
     if pdf_btn.count() > 0:
         href = pdf_btn.get_attribute("href")
         if href:
@@ -317,15 +381,17 @@ def download_sciencedirect(page: Any, item: dict[str, Any], out_path: str, timeo
 
             if "pdf.sciencedirectassets.com" in page.url or page.url.endswith(".pdf"):
                 data, err = _fetch_via_inpage_js(page)
+                last_err = err
                 saved = _try_save_bytes(data, err, out_path, "sciencedirect_js_blob", min_bytes)
                 if saved:
                     return saved
+        else:
+            ok, dl_err, size = _try_click_download(page, pdf_btn, out_path, timeout_ms, min_bytes)
+            if ok:
+                return DownloadResult(status="downloaded", local_file=os.path.basename(out_path), bytes_written=size, method="sciencedirect_click_download")
+            last_err = dl_err
 
-    url, title, body = _safe_inspect_page(page)
-    b_status, b_reason = detect_page_block(url, title, body)
-    if b_status:
-        return DownloadResult(status=b_status, error=b_reason)
-    return DownloadResult(status="failed", error=f"ScienceDirect PDF button/asset unreachable at {page.url}")
+    return _finalize_failure(page, f"ScienceDirect PDF button/asset unreachable at {page.url}", last_err)
 
 
 def download_iop(page: Any, item: dict[str, Any], out_path: str, timeout_ms: int = 45000, min_bytes: int = DEFAULT_MIN_PDF_BYTES) -> DownloadResult:
@@ -340,9 +406,20 @@ def download_iop(page: Any, item: dict[str, Any], out_path: str, timeout_ms: int
     curr_url = page.url
     pdf_url = curr_url.split("?")[0].rstrip("/") + "/pdf"
     data, err = _fetch_via_request(page, pdf_url, timeout_ms)
+    last_err = err
     saved = _try_save_bytes(data, err, out_path, "iop_direct_pdf", min_bytes)
-    if saved:
+    if saved and saved.status == "downloaded":
         return saved
+    challenge_result = saved if saved and saved.status in ("captcha_required", "rate_limited") else None
+
+    # In-page JS fetch preserves browser bot-challenge state (e.g., Radware)
+    data_js, err_js = _fetch_via_inpage_js(page, pdf_url)
+    last_err = err_js or last_err
+    saved_js = _try_save_bytes(data_js, err_js, out_path, "iop_js_pdf", min_bytes)
+    if saved_js and saved_js.status == "downloaded":
+        return saved_js
+    if saved_js and not challenge_result:
+        challenge_result = saved_js
 
     pdf_link = page.locator('a[href*="/pdf"], a:has-text("PDF")').first
     if pdf_link.count() > 0:
@@ -351,19 +428,20 @@ def download_iop(page: Any, item: dict[str, Any], out_path: str, timeout_ms: int
             if not href.startswith("http"):
                 href = "https://iopscience.iop.org" + href
             data, err = _fetch_via_request(page, href, timeout_ms)
+            last_err = err or last_err
             saved = _try_save_bytes(data, err, out_path, "iop_link_href", min_bytes)
-            if saved:
+            if saved and saved.status == "downloaded":
                 return saved
+            if saved and not challenge_result:
+                challenge_result = saved
 
         ok, _, size = _try_click_download(page, pdf_link, out_path, timeout_ms, min_bytes)
         if ok:
             return DownloadResult(status="downloaded", local_file=os.path.basename(out_path), bytes_written=size, method="iop_click_download")
 
-    url, title, body = _safe_inspect_page(page)
-    b_status, b_reason = detect_page_block(url, title, body)
-    if b_status:
-        return DownloadResult(status=b_status, error=b_reason)
-    return DownloadResult(status="failed", error=f"IOP PDF download failed at {curr_url}")
+    if challenge_result:
+        return challenge_result
+    return _finalize_failure(page, f"IOP PDF download failed at {curr_url}", last_err)
 
 
 def download_wiley(page: Any, item: dict[str, Any], out_path: str, timeout_ms: int = 45000, min_bytes: int = DEFAULT_MIN_PDF_BYTES) -> DownloadResult:
@@ -381,6 +459,7 @@ def download_wiley(page: Any, item: dict[str, Any], out_path: str, timeout_ms: i
         pdf_url = pdf_url.replace("/doi/", "/doi/pdfdirect/", 1)
 
     data, err = _fetch_via_request(page, pdf_url, timeout_ms)
+    last_err = err
     saved = _try_save_bytes(data, err, out_path, "wiley_pdfdirect", min_bytes)
     if saved:
         return saved
@@ -393,6 +472,7 @@ def download_wiley(page: Any, item: dict[str, Any], out_path: str, timeout_ms: i
                 base = curr_url.split("/doi/")[0]
                 href = base + href
             data, err = _fetch_via_request(page, href, timeout_ms)
+            last_err = err or last_err
             saved = _try_save_bytes(data, err, out_path, "wiley_link_href", min_bytes)
             if saved:
                 return saved
@@ -401,48 +481,78 @@ def download_wiley(page: Any, item: dict[str, Any], out_path: str, timeout_ms: i
         if ok:
             return DownloadResult(status="downloaded", local_file=os.path.basename(out_path), bytes_written=size, method="wiley_click_download")
 
-    url, title, body = _safe_inspect_page(page)
-    b_status, b_reason = detect_page_block(url, title, body)
-    if b_status:
-        return DownloadResult(status=b_status, error=b_reason)
-    return DownloadResult(status="failed", error=f"Wiley PDF download failed at {curr_url}")
+    return _finalize_failure(page, f"Wiley PDF download failed at {curr_url}", last_err)
 
 
 def download_acs(page: Any, item: dict[str, Any], out_path: str, timeout_ms: int = 45000, min_bytes: int = DEFAULT_MIN_PDF_BYTES) -> DownloadResult:
     target = item.get("url") or (f"https://doi.org/{item['doi']}" if item.get("doi") else "")
     page.goto(target, wait_until="domcontentloaded", timeout=timeout_ms)
-    time.sleep(5.0)
+    time.sleep(3.0)
+
+    # Give transient Cloudflare JS check a brief window to clear naturally before pausing
+    for _ in range(3):
+        _, title_now, _ = _safe_inspect_page(page)
+        t_low = title_now.lower()
+        if "just a moment" not in t_low and "请稍候" not in title_now:
+            break
+        time.sleep(2.0)
 
     blocked = _check_block_on_current_page(page)
     if blocked:
         return blocked
 
-    try:
-        client = page.context.new_cdp_session(page)
-        client.send("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": os.path.dirname(os.path.abspath(out_path))})
-    except Exception:
-        pass
-
-    btn = page.locator('a[href*="/doi/pdf/"], a[title*="PDF"], a:has-text("PDF")').first
+    last_err = ""
+    challenge_result = None
+    btn = page.locator('a[href*="/doi/pdf/"], a[href*="article-pdf"], a[title*="PDF"], a:has-text("PDF")').first
     if btn.count() > 0:
         href = btn.get_attribute("href")
         if href:
             if not href.startswith("http"):
                 href = "https://pubs.acs.org" + href
             data, err = _fetch_via_request(page, href, timeout_ms)
+            last_err = err
             saved = _try_save_bytes(data, err, out_path, "acs_link_href", min_bytes)
-            if saved:
+            if saved and saved.status == "downloaded":
                 return saved
+            if saved:
+                challenge_result = saved
 
-        ok, _, size = _try_click_download(page, btn, out_path, timeout_ms, min_bytes)
-        if ok:
-            return DownloadResult(status="downloaded", local_file=os.path.basename(out_path), bytes_written=size, method="acs_click_download")
+            # In-page fetch preserves Cloudflare clearance cookies/headers
+            data_js, err_js = _fetch_via_inpage_js(page, href)
+            last_err = err_js or last_err
+            saved_js = _try_save_bytes(data_js, err_js, out_path, "acs_js_fetch", min_bytes)
+            if saved_js and saved_js.status == "downloaded":
+                return saved_js
+            if saved_js and not challenge_result:
+                challenge_result = saved_js
 
-    url, title, body = _safe_inspect_page(page)
-    b_status, b_reason = detect_page_block(url, title, body)
-    if b_status:
-        return DownloadResult(status=b_status, error=b_reason)
-    return DownloadResult(status="failed", error=f"ACS PDF download failed at {page.url}")
+        client = None
+        try:
+            ctx = getattr(page, "context", None)
+            if ctx is not None and hasattr(ctx, "new_cdp_session"):
+                client = ctx.new_cdp_session(page)
+                client.send("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": os.path.dirname(os.path.abspath(out_path))})
+        except Exception:
+            client = None
+
+        try:
+            ok, _, size = _try_click_download(page, btn, out_path, timeout_ms, min_bytes)
+            if ok:
+                return DownloadResult(status="downloaded", local_file=os.path.basename(out_path), bytes_written=size, method="acs_click_download")
+        finally:
+            if client is not None:
+                try:
+                    client.detach()
+                except Exception:
+                    pass
+
+        popup_res = _try_popup_pdf(page, btn, out_path, timeout_ms, min_bytes, "acs")
+        if popup_res:
+            return popup_res
+
+    if challenge_result:
+        return challenge_result
+    return _finalize_failure(page, f"ACS PDF download failed at {page.url}", last_err)
 
 
 def download_cnki(page: Any, item: dict[str, Any], out_path: str, timeout_ms: int = 45000, min_bytes: int = DEFAULT_MIN_PDF_BYTES) -> DownloadResult:
@@ -454,29 +564,31 @@ def download_cnki(page: Any, item: dict[str, Any], out_path: str, timeout_ms: in
     if blocked:
         return blocked
 
-    btn = page.locator('#pdfDown, a#pdfDown, a:has-text("PDF下载"), a[href*="download.aspx"]').first
+    btn = page.locator('#pdfDown, a#pdfDown, a:has-text("PDF下载"), a:has-text("整本下载"), .btn-dlpdf a, a[href*="download.aspx"]').first
     if btn.count() > 0:
         ok, _, size = _try_click_download(page, btn, out_path, timeout_ms, min_bytes)
         if ok:
             return DownloadResult(status="downloaded", local_file=os.path.basename(out_path), bytes_written=size, method="cnki_click_download")
 
-        # Sometimes CNKI opens a PDF viewer or triggers security check after click
+        popup_res = _try_popup_pdf(page, btn, out_path, timeout_ms, min_bytes, "cnki")
+        if popup_res:
+            return popup_res
+
+        # Sometimes CNKI opens a PDF viewer or triggers security check in the current tab
         time.sleep(2.0)
         blocked = _check_block_on_current_page(page)
         if blocked:
             return blocked
 
-    url, title, body = _safe_inspect_page(page)
-    b_status, b_reason = detect_page_block(url, title, body)
-    if b_status:
-        return DownloadResult(status=b_status, error=b_reason)
-    return DownloadResult(status="failed", error=f"CNKI PDF button not found or download failed at {page.url}")
+    return _finalize_failure(page, f"CNKI PDF button not found or download failed at {page.url}")
 
 
 def download_generic(page: Any, item: dict[str, Any], out_path: str, timeout_ms: int = 45000, min_bytes: int = DEFAULT_MIN_PDF_BYTES) -> DownloadResult:
     target = item.get("url") or (f"https://doi.org/{item['doi']}" if item.get("doi") else "")
+    last_err = ""
     if target.lower().endswith(".pdf") or "arxiv.org/pdf/" in target.lower():
         data, err = _fetch_via_request(page, target, timeout_ms)
+        last_err = err
         saved = _try_save_bytes(data, err, out_path, "generic_direct_url", min_bytes)
         if saved:
             return saved
@@ -498,6 +610,7 @@ def download_generic(page: Any, item: dict[str, Any], out_path: str, timeout_ms:
 
     if meta_pdf:
         data, err = _fetch_via_request(page, meta_pdf, timeout_ms)
+        last_err = err or last_err
         saved = _try_save_bytes(data, err, out_path, "meta_citation_pdf_url", min_bytes)
         if saved:
             return saved
@@ -512,6 +625,7 @@ def download_generic(page: Any, item: dict[str, Any], out_path: str, timeout_ms:
                     href = m_origin.group(1) + href
             if href.startswith("http"):
                 data, err = _fetch_via_request(page, href, timeout_ms)
+                last_err = err or last_err
                 saved = _try_save_bytes(data, err, out_path, "generic_link_href", min_bytes)
                 if saved:
                     return saved
@@ -520,11 +634,7 @@ def download_generic(page: Any, item: dict[str, Any], out_path: str, timeout_ms:
         if ok:
             return DownloadResult(status="downloaded", local_file=os.path.basename(out_path), bytes_written=size, method="generic_click_download")
 
-    url, title, body = _safe_inspect_page(page)
-    b_status, b_reason = detect_page_block(url, title, body)
-    if b_status:
-        return DownloadResult(status=b_status, error=b_reason)
-    return DownloadResult(status="failed", error=f"No valid PDF found on page {page.url}")
+    return _finalize_failure(page, f"No valid PDF found on page {page.url}", last_err)
 
 
 ADAPTERS = {
@@ -545,6 +655,9 @@ def download_single_paper(
     min_bytes: int = DEFAULT_MIN_PDF_BYTES,
 ) -> DownloadResult:
     """Dispatch a paper entry to the appropriate publisher adapter."""
+    target = item.get("url") or (f"https://doi.org/{item['doi']}" if item.get("doi") else "")
+    if not target:
+        return DownloadResult(status="failed", error="Entry has no DOI or URL")
     publisher = item.get("publisher", "other")
     adapter = ADAPTERS.get(publisher, download_generic)
     try:

@@ -89,6 +89,33 @@ class TestScannerAndState(unittest.TestCase):
             self.assertEqual(by_code["S02"]["status"], "pending")
             self.assertEqual(by_code["S03"]["status"], "downloaded")
 
+    def test_scan_prevents_false_match_on_colliding_input_codes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_dir = os.path.join(tmp, "pdfs")
+            os.makedirs(pdf_dir)
+            list_a = os.path.join(tmp, "a.md")
+            list_b = os.path.join(tmp, "b.md")
+            state_path = os.path.join(tmp, "missing_papers.json")
+
+            with open(list_a, "w", encoding="utf-8") as f:
+                f.write("- [S01] Alpha Paper Study — https://doi.org/10.1109/EXAMPLE.1\n")
+            with open(list_b, "w", encoding="utf-8") as f:
+                f.write("- [S01] Beta Different Paper — https://doi.org/10.1016/j.example.2\n")
+
+            with open(os.path.join(pdf_dir, "S01_Alpha Paper Study.pdf"), "wb") as f:
+                f.write(b"%PDF-1.4\n" + (b"x" * 2048))
+
+            rc = paper_downloader.main(["scan", "--input", list_a, list_b, "--pdf-dir", pdf_dir, "--state", state_path])
+            self.assertEqual(rc, 0)
+            with open(state_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+
+            self.assertEqual(state["summary"]["downloaded"], 1)
+            self.assertEqual(state["summary"]["pending"], 1)
+            self.assertEqual(state["papers"][0]["code"], "S01")
+            self.assertEqual(state["papers"][1]["code"], "S01_2")
+            self.assertEqual(state["papers"][1]["status"], "pending")
+
 
 if __name__ == "__main__":
     unittest.main()
