@@ -1,0 +1,6 @@
+# Plain DOI / URL List Example (comments and blank lines are ignored)
+10.1109/EXAMPLE.2023.10001
+https://doi.org/10.1016/j.example.2024.10002
+
+# Optional pipe-delimited format: CODE | TITLE | DOI_OR_URL
+X01 | Sample ArXiv Preprint Entry | https://arxiv.org/pdf/2401.00001.pdf

@@ -1,0 +1,14 @@
+{
+  "name": "academic-paper-downloader",
+  "displayName": "Academic Paper Downloader",
+  "version": "1.0.0",
+  "description": "Authorized academic literature parsing, local inventory verification, and multi-publisher Chrome CDP download workflow with rate-limit protection and resumable state tracking.",
+  "author": "uuina",
+  "homepage": "https://github.com/uuina/academic-paper-downloader",
+  "repository": "https://github.com/uuina/academic-paper-downloader",
+  "suggestedPrompts": [
+    "Parse my Markdown literature list and find which PDFs are missing locally",
+    "Download missing papers via my authenticated Chrome CDP session with safe rate limits",
+    "Check resumable download status in missing_papers.json"
+  ]
+}

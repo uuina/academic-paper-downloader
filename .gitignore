@@ -1,0 +1,20 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+
+# Local virtual environment
+.venv/
+venv/
+
+# User workspace & downloaded papers / state files
+papers/
+downloads/
+missing_papers.json
+*.pdf
+*.tmp
+*.log
+*.bak
+.env

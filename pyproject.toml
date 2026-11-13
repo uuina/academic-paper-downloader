@@ -1,0 +1,19 @@
+[project]
+name = "academic-paper-downloader"
+version = "1.0.0"
+description = "Compliant multi-publisher academic paper downloader skill and CLI leveraging an authenticated Chrome CDP session."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "playwright>=1.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["skills/academic-paper-downloader/scripts"]
